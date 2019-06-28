@@ -1,0 +1,13 @@
+[
+    {
+        "name": "iida_hakone",
+        "image": "667009429896.dkr.ecr.ap-northeast-1.amazonaws.com/iida_hakone:latest",
+        "essential": true,
+        "portMappings": [
+            {
+                "protocol": "tcp",
+                "containerPort": 80
+            }
+        ]
+    }
+]

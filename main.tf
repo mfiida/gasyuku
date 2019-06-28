@@ -247,7 +247,7 @@ resource "aws_ecs_task_definition" "iida_hakone" {
 }
 
 resource "aws_ecs_service" "iida_hakone" {
-    name             = "iida-hakone"
+    name             = "iida_hakone"
     cluster          = aws_ecs_cluster.iida_hakone.arn
     task_definition  = aws_ecs_task_definition.iida_hakone.arn
     desired_count    = 2
@@ -338,4 +338,205 @@ EOF
 
 output "ecr_name" {
     value = aws_ecr_lifecycle_policy.iida_hakone
+}
+
+# codebuild
+
+data "aws_iam_policy_document" "iida_hakone_codebuild" {
+  statement {
+    effect    = "Allow"
+    resources = ["*"]
+
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:GetRepositoryPolicy",
+      "ecr:DescribeRepositories",
+      "ecr:ListImages",
+      "ecr:DescribeImages",
+      "ecr:BatchGetImage",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart",
+      "ecr:CompleteLayerUpload",
+      "ecr:PutImage",
+    ]
+  }
+}
+
+module "iida_hakone_codebuild_role" {
+  source     = "./iam_role"
+  name       = "iida_hakone_codebuild"
+  identifier = "codebuild.amazonaws.com"
+  policy     = data.aws_iam_policy_document.iida_hakone_codebuild.json
+}
+
+resource "aws_codebuild_project" "iida_hakone" {
+  name         = "iida_hakone"
+  service_role = module.iida_hakone_codebuild_role.iam_role_arn
+
+  source {
+    type = "CODEPIPELINE"
+  }
+
+  artifacts {
+    type = "CODEPIPELINE"
+  }
+
+  environment {
+    type            = "LINUX_CONTAINER"
+    compute_type    = "BUILD_GENERAL1_SMALL"
+    image           = "aws/codebuild/ubuntu-base:14.04"
+    privileged_mode = true
+  }
+}
+
+data "aws_iam_policy_document" "iida_hakone_codepipeline" {
+  statement {
+    effect    = "Allow"
+    resources = ["*"]
+
+    actions = [
+      "s3:PutObject",
+      "s3:GetObject",
+      "s3:GetObjectVersion",
+      "s3:GetBucketVersioning",
+      "codebuild:BatchGetBuilds",
+      "codebuild:StartBuild",
+      "ecs:DescribeServices",
+      "ecs:DescribeTaskDefinition",
+      "ecs:DescribeTasks",
+      "ecs:ListTasks",
+      "ecs:RegisterTaskDefinition",
+      "ecs:UpdateService",
+      "iam:PassRole",
+    ]
+  }
+}
+
+module "iida_hakone_codepipeline_role" {
+  source     = "./iam_role"
+  name       = "iida-hakone-codepipeline"
+  identifier = "codepipeline.amazonaws.com"
+  policy     = data.aws_iam_policy_document.iida_hakone_codepipeline.json
+}
+
+resource "aws_s3_bucket" "iida_hakone_artifact" {
+  bucket = "iida-hakone-artifact"
+
+  lifecycle_rule {
+    enabled = true
+
+    expiration {
+      days = "1"
+    }
+  }
+}
+
+resource "aws_codepipeline" "iida_hakone" {
+    name = "iida_hakone"
+    role_arn = module.iida_hakone_codepipeline_role.iam_role_arn
+
+    stage {
+        name = "Source"
+
+        action {
+            name     = "Source"
+            category = "Source"
+            owner    = "ThirdParty"
+            provider = "GitHub"
+            version  = 1
+            output_artifacts = ["Source"]
+
+            configuration = {
+                Owner = "mfiida"
+                Repo  = "goserver"
+                Branch = "master"
+                PollForSourceChanges = false
+            }
+        }
+
+    }
+
+    stage {
+        name = "Build"
+
+        action {
+            name     = "Build"
+            category = "Build"
+            owner    = "AWS"
+            provider = "CodeBuild"
+            version  = 1
+            input_artifacts = ["Source"]
+            output_artifacts = ["Build"]
+
+            configuration = {
+                ProjectName = aws_codebuild_project.iida_hakone.id
+            }
+        }
+    }
+
+    stage {
+        name = "Deploy"
+
+        action {
+            name     = "Deploy"
+            category = "Deploy"
+            owner    = "AWS"
+            provider = "ECS"
+            version  = 1
+            input_artifacts = ["Build"]
+
+            configuration = {
+                ClusterName = aws_ecs_cluster.iida_hakone.name
+                ServiceName = aws_ecs_service.iida_hakone.name
+                FileName    = "imagedefinitions.json"
+            }
+        }
+    }
+
+    artifact_store {
+        location = aws_s3_bucket.iida_hakone_artifact.id
+        type = "S3"
+    }
+}
+
+resource "aws_codepipeline_webhook" "iida_hakone" {
+    name            = "iida_hakone"
+    target_pipeline = aws_codepipeline.iida_hakone.name
+    target_action   = "Source"
+    authentication  = "GITHUB_HMAC"
+
+    authentication_configuration {
+        secret_token = "dXa3VJiAnLQwzzg8SCXZEPtK"
+    }
+
+    filter {
+        json_path    = "$.ref"
+        match_equals = "refs/heads/{Branch}"
+    }
+}
+
+# github
+provider "github" {
+    organization = "mfiida"
+}
+
+resource "github_repository_webhook" "iida_hakone" {
+    repository = "goserver"
+
+    configuration {
+        url = aws_codepipeline_webhook.iida_hakone.url
+        secret = "dXa3VJiAnLQwzzg8SCXZEPtK"
+        content_type = "json"
+        insecure_ssl = false
+    }
+
+    events = ["push"]
 }
